@@ -4,21 +4,18 @@
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/dot.h"
 
-#define instantiate_dot(name, itype, acctype, nc, axpby) \
-  instantiate_kernel(                                    \
-      "dot_" #name "_nc" #nc "_axpby" #axpby,          \
-      dot,                                               \
-      itype,                                             \
-      acctype,                                           \
-      axpby,                                             \
-      nc,                                                \
+#define instantiate_dot(name, itype, acctype, axpby) \
+  instantiate_kernel(                                 \
+      "dot_" #name "_axpby" #axpby,                 \
+      dot,                                             \
+      itype,                                           \
+      acctype,                                         \
+      axpby,                                           \
       256)
 
 #define instantiate_dot_type(name, itype, acctype) \
-  instantiate_dot(name, itype, acctype, 0, 0)      \
-  instantiate_dot(name, itype, acctype, 0, 1)      \
-  instantiate_dot(name, itype, acctype, 1, 0)      \
-  instantiate_dot(name, itype, acctype, 1, 1)
+  instantiate_dot(name, itype, acctype, 0)         \
+  instantiate_dot(name, itype, acctype, 1)
 
 instantiate_dot_type(float32, float, float);
 instantiate_dot_type(float16, half, float);

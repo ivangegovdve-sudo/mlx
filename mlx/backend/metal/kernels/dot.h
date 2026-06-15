@@ -22,29 +22,18 @@ struct DotAccT<complex64_t> {
   using type = complex64_t;
 };
 
-template <
-    typename T,
-    typename AccT,
-    bool kDoAxpby,
-    bool kDoNCBatch,
-    const int TPG>
+template <typename T, typename AccT, bool kDoAxpby, const int TPG>
 [[kernel, max_total_threads_per_threadgroup(TPG)]] void dot(
     const device T* a [[buffer(0)]],
     const device T* b [[buffer(1)]],
     const device T* c [[buffer(2)]],
     device T* out [[buffer(3)]],
     const constant int& K [[buffer(4)]],
-    const constant int& lda [[buffer(5)]],
-    const constant int& ldb [[buffer(6)]],
-    const constant int& transpose_a [[buffer(7)]],
-    const constant int& transpose_b [[buffer(8)]],
-    const constant float& alpha [[buffer(9)]],
-    const constant float& beta [[buffer(10)]],
-    const constant int& batch_ndim [[buffer(11)]],
-    const constant int* batch_shape [[buffer(12)]],
-    const constant int64_t* a_batch_stride [[buffer(13)]],
-    const constant int64_t* b_batch_stride [[buffer(14)]],
-    const constant int64_t* c_batch_stride [[buffer(15)]],
+    const constant int64_t& a_batch_stride [[buffer(5)]],
+    const constant int64_t& b_batch_stride [[buffer(6)]],
+    const constant int64_t& c_batch_stride [[buffer(7)]],
+    const constant float& alpha [[buffer(8)]],
+    const constant float& beta [[buffer(9)]],
     uint3 tid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]],
     uint simd_gid [[simdgroup_index_in_threadgroup]],
@@ -52,30 +41,28 @@ template <
   // Allocate threadgroup memory for inter-simdgroup reduction
   threadgroup AccT tgp_memory[TPG / 32];
 
-  // Compute batch offsets
-  if (kDoNCBatch) {
-    a += elem_to_loc(tid.z, batch_shape, a_batch_stride, batch_ndim);
-    b += elem_to_loc(tid.z, batch_shape, b_batch_stride, batch_ndim);
-    if (kDoAxpby) {
-      c += elem_to_loc(tid.z, batch_shape, c_batch_stride, batch_ndim);
-    }
-  } else {
-    a += tid.z * a_batch_stride[0];
-    b += tid.z * b_batch_stride[0];
-    if (kDoAxpby) {
-      c += tid.z * c_batch_stride[0];
+  // Batch offsets
+  a += tid.z * a_batch_stride;
+  b += tid.z * b_batch_stride;
+  out += tid.z;
+  if (kDoAxpby) {
+    c += tid.z * c_batch_stride;
+  }
+
+  // Per-thread accumulation over K with vectorized contiguous reads
+  constexpr int N = 16 / sizeof(T);
+  AccT acc = 0;
+
+  int i = lid.x * N;
+  for (; i + N <= K; i += TPG * N) {
+#pragma unroll
+    for (int j = 0; j < N; ++j) {
+      acc += static_cast<AccT>(a[i + j]) * static_cast<AccT>(b[i + j]);
     }
   }
-  out += tid.z;
-
-  // Per-thread accumulation over K with coalesced reads
-  AccT acc = 0;
-  int a_stride = transpose_a ? lda : 1;
-  int b_stride = transpose_b ? 1 : ldb;
-
-  for (int i = lid.x; i < K; i += TPG) {
-    acc +=
-        static_cast<AccT>(a[i * a_stride]) * static_cast<AccT>(b[i * b_stride]);
+  // Scalar tail
+  for (; i < K; ++i) {
+    acc += static_cast<AccT>(a[i]) * static_cast<AccT>(b[i]);
   }
 
   // SIMD reduction

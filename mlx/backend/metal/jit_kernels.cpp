@@ -595,6 +595,7 @@ MTL::ComputePipelineState* get_dot_kernel(
     const array& out,
     bool axpby,
     bool nc_batch) {
+  (void)nc_batch;
   const auto& lib_name = kernel_name;
   auto lib = d.get_library(lib_name, [&]() {
     std::ostringstream kernel_source;
@@ -605,7 +606,6 @@ MTL::ComputePipelineState* get_dot_kernel(
                          get_type_string(out.dtype()),
                          get_dot_acc_type_string(out.dtype()),
                          axpby ? "true" : "false",
-                         nc_batch ? "true" : "false",
                          256);
     return kernel_source.str();
   });

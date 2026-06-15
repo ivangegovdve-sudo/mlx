@@ -1151,9 +1151,9 @@ template <bool CHECK_AB = true>
 void dot_product_axbpy(
     const Stream& s,
     metal::Device& d,
-    const array& a,
-    const array& b,
-    const array& c,
+    const array& a_pre,
+    const array& b_pre,
+    const array& c_pre,
     array& out,
     int K,
     int batch_size_out,
@@ -1168,6 +1168,48 @@ void dot_product_axbpy(
     Strides C_batch_stride = {},
     float alpha = 1.0f,
     float beta = 0.0f) {
+  (void)lda;
+  (void)ldb;
+  (void)transpose_a;
+  (void)transpose_b;
+
+  const bool do_axpby = CHECK_AB && (alpha != 1.0f || beta != 0.0f);
+
+  array a = a_pre;
+  array b = b_pre;
+  array c = c_pre;
+
+  // The kernel assumes contiguous K-dim and simple contiguous batching.
+  // check_transpose already ensures K-dim stride is 1. Copy if batching is
+  // non-contiguous so we can use simple batch strides.
+  if (batch_shape.size() > 1) {
+    a = contiguous_copy_gpu(a, s);
+    b = contiguous_copy_gpu(b, s);
+    copies.push_back(a);
+    copies.push_back(b);
+    if (do_axpby) {
+      c = contiguous_copy_gpu(c, s);
+      copies.push_back(c);
+    }
+    if (CHECK_AB) {
+      auto [batch_shape_, A_bstride_, B_bstride_, C_bstride_] =
+          collapse_batches(a, b, c);
+      batch_shape = batch_shape_;
+      A_batch_stride = A_bstride_;
+      B_batch_stride = B_bstride_;
+      C_batch_stride = C_bstride_;
+    } else {
+      auto [batch_shape_, A_bstride_, B_bstride_] = collapse_batches(a, b);
+      batch_shape = batch_shape_;
+      A_batch_stride = A_bstride_;
+      B_batch_stride = B_bstride_;
+    }
+  }
+
+  // Recompute leading dims for split-K from (possibly copied) arrays.
+  int lda_new = a.strides()[a.ndim() - 2];
+  int ldb_new = b.strides()[b.ndim() - 2];
+
   // Use split-K for very large vectors to get more parallelism
   constexpr int split_k_threshold = 65536;
   if (K >= split_k_threshold) {
@@ -1180,10 +1222,10 @@ void dot_product_axbpy(
         out,
         K,
         batch_size_out,
-        lda,
-        ldb,
-        transpose_a,
-        transpose_b,
+        lda_new,
+        ldb_new,
+        false,
+        false,
         copies,
         std::move(batch_shape),
         std::move(A_batch_stride),
@@ -1193,15 +1235,10 @@ void dot_product_axbpy(
         beta);
   }
 
-  bool contiguous_kernel = (batch_shape.size() == 1);
-  const bool do_axpby = CHECK_AB && (alpha != 1.0f || beta != 0.0f);
-
   std::ostringstream kname;
-  kname << "dot_" << type_to_name(out) << "_nc" << !contiguous_kernel
-        << "_axpby" << do_axpby;
+  kname << "dot_" << type_to_name(out) << "_axpby" << do_axpby;
 
-  auto kernel =
-      get_dot_kernel(d, kname.str(), out, do_axpby, !contiguous_kernel);
+  auto kernel = get_dot_kernel(d, kname.str(), out, do_axpby, false);
 
   auto& compute_encoder = metal::get_command_encoder(s);
   compute_encoder.set_compute_pipeline_state(kernel);
@@ -1212,28 +1249,18 @@ void dot_product_axbpy(
 
   compute_encoder.set_input_array(a, 0);
   compute_encoder.set_input_array(b, 1);
+  compute_encoder.set_input_array(c, 2);
   compute_encoder.set_output_array(out, 3);
 
   compute_encoder.set_bytes(K, 4);
-  compute_encoder.set_bytes(lda, 5);
-  compute_encoder.set_bytes(ldb, 6);
-  compute_encoder.set_bytes(transpose_a ? 1 : 0, 7);
-  compute_encoder.set_bytes(transpose_b ? 1 : 0, 8);
-
-  if (do_axpby) {
-    compute_encoder.set_input_array(c, 2);
-    compute_encoder.set_bytes(alpha, 9);
-    compute_encoder.set_bytes(beta, 10);
-  }
-
-  int batch_ndim = batch_shape.size();
-  compute_encoder.set_bytes(batch_ndim, 11);
-  compute_encoder.set_vector_bytes(batch_shape, 12);
-  compute_encoder.set_vector_bytes(A_batch_stride, 13);
-  compute_encoder.set_vector_bytes(B_batch_stride, 14);
-  if (do_axpby) {
-    compute_encoder.set_vector_bytes(C_batch_stride, 15);
-  }
+  int64_t a_batch_stride_ = A_batch_stride.empty() ? 0 : A_batch_stride.back();
+  int64_t b_batch_stride_ = B_batch_stride.empty() ? 0 : B_batch_stride.back();
+  int64_t c_batch_stride_ = C_batch_stride.empty() ? 0 : C_batch_stride.back();
+  compute_encoder.set_bytes(a_batch_stride_, 5);
+  compute_encoder.set_bytes(b_batch_stride_, 6);
+  compute_encoder.set_bytes(c_batch_stride_, 7);
+  compute_encoder.set_bytes(alpha, 8);
+  compute_encoder.set_bytes(beta, 9);
 
   compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
   compute_encoder.add_temporaries(std::move(copies));
