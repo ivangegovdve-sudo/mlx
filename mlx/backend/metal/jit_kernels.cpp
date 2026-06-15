@@ -612,6 +612,49 @@ MTL::ComputePipelineState* get_dot_kernel(
   return d.get_kernel(kernel_name, lib);
 }
 
+MTL::ComputePipelineState* get_dot_splitk_kernel(
+    metal::Device& d,
+    const std::string& kernel_name,
+    const array& out,
+    bool nc_batch) {
+  const auto& lib_name = kernel_name;
+  auto lib = d.get_library(lib_name, [&]() {
+    std::ostringstream kernel_source;
+    kernel_source << metal::utils() << metal::dot_splitk()
+                  << get_template_definition(
+                         lib_name,
+                         "dot_splitk",
+                         get_type_string(out.dtype()),
+                         get_dot_acc_type_string(out.dtype()),
+                         nc_batch ? "true" : "false",
+                         256);
+    return kernel_source.str();
+  });
+  return d.get_kernel(kernel_name, lib);
+}
+
+MTL::ComputePipelineState* get_dot_splitk_accum_kernel(
+    metal::Device& d,
+    const std::string& kernel_name,
+    const array& out,
+    bool axpby,
+    bool nc_batch) {
+  const auto& lib_name = kernel_name;
+  auto lib = d.get_library(lib_name, [&]() {
+    std::ostringstream kernel_source;
+    kernel_source << metal::utils() << metal::dot_splitk()
+                  << get_template_definition(
+                         lib_name,
+                         "dot_splitk_accum",
+                         get_type_string(out.dtype()),
+                         get_dot_acc_type_string(out.dtype()),
+                         axpby ? "true" : "false",
+                         nc_batch ? "true" : "false");
+    return kernel_source.str();
+  });
+  return d.get_kernel(kernel_name, lib);
+}
+
 MTL::ComputePipelineState* get_steel_gemm_masked_kernel(
     metal::Device& d,
     const std::string& kernel_name,

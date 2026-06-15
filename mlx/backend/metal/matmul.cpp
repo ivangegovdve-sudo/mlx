@@ -1040,6 +1040,114 @@ void steel_matmul_axpby(
 ///////////////////////////////////////////////////////////////////////////////
 
 template <bool CHECK_AB = true>
+void dot_product_splitk_axbpy(
+    const Stream& s,
+    metal::Device& d,
+    const array& a,
+    const array& b,
+    const array& c,
+    array& out,
+    int K,
+    int batch_size_out,
+    int lda,
+    int ldb,
+    bool transpose_a,
+    bool transpose_b,
+    std::vector<array>& copies,
+    Shape batch_shape = {},
+    Strides A_batch_stride = {},
+    Strides B_batch_stride = {},
+    Strides C_batch_stride = {},
+    float alpha = 1.0f,
+    float beta = 0.0f) {
+  bool contiguous_kernel = (batch_shape.size() == 1);
+  const bool do_axpby = CHECK_AB && (alpha != 1.0f || beta != 0.0f);
+
+  // Choose split-k parameters
+  constexpr int split_k_threshold = 65536;
+  int split_k_partitions =
+      std::min(std::max(2, next_power_of_2(K / split_k_threshold)), 32);
+  int partition_size = (K + split_k_partitions - 1) / split_k_partitions;
+
+  // Allocate intermediate partial sums
+  array C_split(
+      {batch_size_out, split_k_partitions},
+      issubdtype(out.dtype(), complexfloating) ? complex64 : float32,
+      nullptr,
+      {});
+  C_split.set_data(allocator::malloc(C_split.nbytes()));
+  copies.push_back(C_split);
+
+  auto& compute_encoder = metal::get_command_encoder(s);
+
+  // Dispatch dot_splitk kernel
+  {
+    std::ostringstream kname;
+    kname << "dot_splitk_" << type_to_name(out) << "_nc" << !contiguous_kernel;
+    auto kernel =
+        get_dot_splitk_kernel(d, kname.str(), out, !contiguous_kernel);
+    compute_encoder.set_compute_pipeline_state(kernel);
+
+    constexpr int tpg = 256;
+    MTL::Size group_dims = MTL::Size(tpg, 1, 1);
+    MTL::Size grid_dims = MTL::Size(split_k_partitions, 1, batch_size_out);
+
+    compute_encoder.set_input_array(a, 0);
+    compute_encoder.set_input_array(b, 1);
+    compute_encoder.set_output_array(C_split, 2);
+
+    compute_encoder.set_bytes(K, 3);
+    compute_encoder.set_bytes(lda, 4);
+    compute_encoder.set_bytes(ldb, 5);
+    compute_encoder.set_bytes(transpose_a ? 1 : 0, 6);
+    compute_encoder.set_bytes(transpose_b ? 1 : 0, 7);
+    compute_encoder.set_bytes(split_k_partitions, 8);
+    compute_encoder.set_bytes(partition_size, 9);
+
+    int batch_ndim = batch_shape.size();
+    compute_encoder.set_bytes(batch_ndim, 10);
+    compute_encoder.set_vector_bytes(batch_shape, 11);
+    compute_encoder.set_vector_bytes(A_batch_stride, 12);
+    compute_encoder.set_vector_bytes(B_batch_stride, 13);
+
+    compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
+  }
+
+  // Dispatch dot_splitk_accum kernel
+  {
+    std::ostringstream kname;
+    kname << "dot_splitk_accum_" << type_to_name(out) << "_nc"
+          << !contiguous_kernel << "_axpby" << do_axpby;
+    auto kernel = get_dot_splitk_accum_kernel(
+        d, kname.str(), out, do_axpby, !contiguous_kernel);
+    compute_encoder.set_compute_pipeline_state(kernel);
+
+    MTL::Size group_dims = MTL::Size(1, 1, 1);
+    MTL::Size grid_dims = MTL::Size(1, 1, batch_size_out);
+
+    compute_encoder.set_input_array(C_split, 0);
+    compute_encoder.set_output_array(out, 1);
+
+    compute_encoder.set_bytes(split_k_partitions, 3);
+
+    if (do_axpby) {
+      compute_encoder.set_input_array(c, 2);
+      compute_encoder.set_bytes(alpha, 4);
+      compute_encoder.set_bytes(beta, 5);
+    }
+
+    int batch_ndim = batch_shape.size();
+    compute_encoder.set_bytes(batch_ndim, 6);
+    compute_encoder.set_vector_bytes(batch_shape, 7);
+    compute_encoder.set_vector_bytes(C_batch_stride, 8);
+
+    compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
+  }
+
+  compute_encoder.add_temporaries(std::move(copies));
+}
+
+template <bool CHECK_AB = true>
 void dot_product_axbpy(
     const Stream& s,
     metal::Device& d,
@@ -1060,6 +1168,31 @@ void dot_product_axbpy(
     Strides C_batch_stride = {},
     float alpha = 1.0f,
     float beta = 0.0f) {
+  // Use split-K for very large vectors to get more parallelism
+  constexpr int split_k_threshold = 65536;
+  if (K >= split_k_threshold) {
+    return dot_product_splitk_axbpy<CHECK_AB>(
+        s,
+        d,
+        a,
+        b,
+        c,
+        out,
+        K,
+        batch_size_out,
+        lda,
+        ldb,
+        transpose_a,
+        transpose_b,
+        copies,
+        std::move(batch_shape),
+        std::move(A_batch_stride),
+        std::move(B_batch_stride),
+        std::move(C_batch_stride),
+        alpha,
+        beta);
+  }
+
   bool contiguous_kernel = (batch_shape.size() == 1);
   const bool do_axpby = CHECK_AB && (alpha != 1.0f || beta != 0.0f);
 

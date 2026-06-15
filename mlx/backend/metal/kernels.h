@@ -234,6 +234,19 @@ MTL::ComputePipelineState* get_dot_kernel(
     bool axpby,
     bool nc_batch);
 
+MTL::ComputePipelineState* get_dot_splitk_kernel(
+    metal::Device& d,
+    const std::string& kernel_name,
+    const array& out,
+    bool nc_batch);
+
+MTL::ComputePipelineState* get_dot_splitk_accum_kernel(
+    metal::Device& d,
+    const std::string& kernel_name,
+    const array& out,
+    bool axpby,
+    bool nc_batch);
+
 MTL::ComputePipelineState* get_steel_conv_general_kernel(
     metal::Device& d,
     const std::string& kernel_name,

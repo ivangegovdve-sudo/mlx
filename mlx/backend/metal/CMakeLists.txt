@@ -81,6 +81,7 @@ if(MLX_METAL_JIT)
                   kernels/fp4.h)
   make_jit_source(gemv_masked)
   make_jit_source(dot)
+  make_jit_source(dot_splitk dot.h)
 
   make_jit_source(steel/attn/kernels/steel_attention)
 
