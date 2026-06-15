@@ -578,6 +578,40 @@ MTL::ComputePipelineState* get_steel_gemm_splitk_accum_kernel(
   return d.get_kernel(kernel_name, lib);
 }
 
+namespace {
+
+std::string get_dot_acc_type_string(Dtype d) {
+  if (d == float16 || d == bfloat16) {
+    return "float";
+  }
+  return get_type_string(d);
+}
+
+} // namespace
+
+MTL::ComputePipelineState* get_dot_kernel(
+    metal::Device& d,
+    const std::string& kernel_name,
+    const array& out,
+    bool axpby,
+    bool nc_batch) {
+  const auto& lib_name = kernel_name;
+  auto lib = d.get_library(lib_name, [&]() {
+    std::ostringstream kernel_source;
+    kernel_source << metal::utils() << metal::dot()
+                  << get_template_definition(
+                         lib_name,
+                         "dot",
+                         get_type_string(out.dtype()),
+                         get_dot_acc_type_string(out.dtype()),
+                         axpby ? "true" : "false",
+                         nc_batch ? "true" : "false",
+                         256);
+    return kernel_source.str();
+  });
+  return d.get_kernel(kernel_name, lib);
+}
+
 MTL::ComputePipelineState* get_steel_gemm_masked_kernel(
     metal::Device& d,
     const std::string& kernel_name,

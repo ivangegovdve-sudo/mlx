@@ -1036,6 +1036,115 @@ void steel_matmul_axpby(
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Dot product dispatch
+///////////////////////////////////////////////////////////////////////////////
+
+template <bool CHECK_AB = true>
+void dot_product_axbpy(
+    const Stream& s,
+    metal::Device& d,
+    const array& a,
+    const array& b,
+    const array& c,
+    array& out,
+    int K,
+    int batch_size_out,
+    int lda,
+    int ldb,
+    bool transpose_a,
+    bool transpose_b,
+    std::vector<array>& copies,
+    Shape batch_shape = {},
+    Strides A_batch_stride = {},
+    Strides B_batch_stride = {},
+    Strides C_batch_stride = {},
+    float alpha = 1.0f,
+    float beta = 0.0f) {
+  bool contiguous_kernel = (batch_shape.size() == 1);
+  const bool do_axpby = CHECK_AB && (alpha != 1.0f || beta != 0.0f);
+
+  std::ostringstream kname;
+  kname << "dot_" << type_to_name(out) << "_nc" << !contiguous_kernel
+        << "_axpby" << do_axpby;
+
+  auto kernel =
+      get_dot_kernel(d, kname.str(), out, do_axpby, !contiguous_kernel);
+
+  auto& compute_encoder = metal::get_command_encoder(s);
+  compute_encoder.set_compute_pipeline_state(kernel);
+
+  constexpr int tpg = 256;
+  MTL::Size group_dims = MTL::Size(tpg, 1, 1);
+  MTL::Size grid_dims = MTL::Size(1, 1, batch_size_out);
+
+  compute_encoder.set_input_array(a, 0);
+  compute_encoder.set_input_array(b, 1);
+  compute_encoder.set_output_array(out, 3);
+
+  compute_encoder.set_bytes(K, 4);
+  compute_encoder.set_bytes(lda, 5);
+  compute_encoder.set_bytes(ldb, 6);
+  compute_encoder.set_bytes(transpose_a ? 1 : 0, 7);
+  compute_encoder.set_bytes(transpose_b ? 1 : 0, 8);
+
+  if (do_axpby) {
+    compute_encoder.set_input_array(c, 2);
+    compute_encoder.set_bytes(alpha, 9);
+    compute_encoder.set_bytes(beta, 10);
+  }
+
+  int batch_ndim = batch_shape.size();
+  compute_encoder.set_bytes(batch_ndim, 11);
+  compute_encoder.set_vector_bytes(batch_shape, 12);
+  compute_encoder.set_vector_bytes(A_batch_stride, 13);
+  compute_encoder.set_vector_bytes(B_batch_stride, 14);
+  if (do_axpby) {
+    compute_encoder.set_vector_bytes(C_batch_stride, 15);
+  }
+
+  compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
+  compute_encoder.add_temporaries(std::move(copies));
+}
+
+inline void dot_product(
+    const Stream& s,
+    metal::Device& d,
+    const array& a,
+    const array& b,
+    array& out,
+    int K,
+    int batch_size_out,
+    int lda,
+    int ldb,
+    bool transpose_a,
+    bool transpose_b,
+    std::vector<array>& copies,
+    Shape batch_shape = {},
+    Strides A_batch_stride = {},
+    Strides B_batch_stride = {}) {
+  dot_product_axbpy<false>(
+      s,
+      d,
+      a,
+      b,
+      /* const array& c = */ b,
+      out,
+      K,
+      batch_size_out,
+      lda,
+      ldb,
+      transpose_a,
+      transpose_b,
+      copies,
+      std::move(batch_shape),
+      std::move(A_batch_stride),
+      std::move(B_batch_stride),
+      {},
+      1.0f,
+      0.0f);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 // GEMV dispatch
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -1276,6 +1385,28 @@ void Matmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   /////////////////////////////////////////////////////////////////////////////
+  // Dot product specialization
+
+  if (M == 1 && N == 1) {
+    return dot_product(
+        /* const Stream& s = */ s,
+        /* metal::Device& d = */ d,
+        /* const array& a = */ a,
+        /* const array& b = */ b,
+        /* array& out = */ out,
+        /* int K = */ K,
+        /* int batch_size_out = */ batch_size_out,
+        /* int lda = */ a_cols,
+        /* int ldb = */ b_cols,
+        /* bool transpose_a = */ a_transposed,
+        /* bool transpose_b = */ b_transposed,
+        /* std::vector<array>& copies = */ copies,
+        /* Shape batch_shape = */ std::move(batch_shape),
+        /* Strides A_batch_stride = */ std::move(A_batch_stride),
+        /* Strides B_batch_stride = */ std::move(B_batch_stride));
+  }
+
+  /////////////////////////////////////////////////////////////////////////////
   // Gemv specialization
 
   // Route to gemv if needed
@@ -1405,6 +1536,32 @@ void AddMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     B_batch_stride = {0};
     C_batch_stride = {0};
     batch_shape = {1};
+  }
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Dot product specialization
+
+  if (M == 1 && N == 1) {
+    return dot_product_axbpy(
+        /* const Stream& s = */ s,
+        /* metal::Device& d = */ d,
+        /* const array& a = */ a,
+        /* const array& b = */ b,
+        /* const array& c = */ c,
+        /* array& out = */ out,
+        /* int K = */ K,
+        /* int batch_size_out = */ batch_size_out,
+        /* int lda = */ lda,
+        /* int ldb = */ ldb,
+        /* bool transpose_a = */ transpose_a,
+        /* bool transpose_b = */ transpose_b,
+        /* std::vector<array>& copies = */ copies,
+        /* Shape batch_shape = */ batch_shape,
+        /* Strides A_batch_stride = */ A_batch_stride,
+        /* Strides B_batch_stride = */ B_batch_stride,
+        /* Strides C_batch_stride = */ C_batch_stride,
+        /* float alpha = */ alpha_,
+        /* float beta = */ beta_);
   }
 
   /////////////////////////////////////////////////////////////////////////////
